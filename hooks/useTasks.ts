@@ -3,8 +3,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { Task, FilterType, CategoryType } from "@/types/task";
 
-const STORAGE_KEY = "task-tracker-tasks";
-
 function sortByDeadline(tasks: Task[]): Task[] {
   return [...tasks].sort((a, b) => {
     if (a.completed !== b.completed) return a.completed ? 1 : -1;
@@ -15,55 +13,77 @@ function sortByDeadline(tasks: Task[]): Task[] {
   });
 }
 
+// Normalize DB row → Task (DB uses snake_case, Task uses camelCase)
+function rowToTask(row: Record<string, unknown>): Task {
+  return {
+    id: row.id as string,
+    text: row.text as string,
+    completed: row.completed as boolean,
+    createdAt: Number(row.created_at),
+    deadline: (row.deadline as string) || undefined,
+    category: row.category as CategoryType,
+  };
+}
+
 export function useTasks() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [filter, setFilter] = useState<FilterType>("all");
   const [mounted, setMounted] = useState(false);
 
+  // Load tasks from API on mount
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) setTasks(JSON.parse(stored));
-    } catch {
-      // ignore corrupted storage
-    }
-    setMounted(true);
+    fetch("/api/tasks")
+      .then((r) => r.json())
+      .then((rows: Record<string, unknown>[]) => {
+        if (Array.isArray(rows)) {
+          setTasks(sortByDeadline(rows.map(rowToTask)));
+        }
+      })
+      .catch(() => {})
+      .finally(() => setMounted(true));
   }, []);
 
-  useEffect(() => {
-    if (mounted) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
-    }
-  }, [tasks, mounted]);
-
-  const addTask = useCallback((text: string, category: CategoryType, deadline?: string) => {
+  const addTask = useCallback(async (text: string, category: CategoryType, deadline?: string) => {
     const trimmed = text.trim();
     if (!trimmed) return;
-    setTasks((prev) =>
-      sortByDeadline([
-        {
-          id: crypto.randomUUID(),
-          text: trimmed,
-          completed: false,
-          createdAt: Date.now(),
-          category,
-          deadline: deadline || undefined,
-        },
-        ...prev,
-      ])
-    );
+
+    const res = await fetch("/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: trimmed, category, deadline: deadline || null }),
+    });
+
+    if (!res.ok) return;
+
+    const row: Record<string, unknown> = await res.json();
+    const newTask = rowToTask(row);
+
+    setTasks((prev) => sortByDeadline([newTask, ...prev]));
   }, []);
 
-  const toggleTask = useCallback((id: string) => {
+  const toggleTask = useCallback(async (id: string) => {
+    // Optimistic update
     setTasks((prev) =>
       sortByDeadline(
         prev.map((t) => (t.id === id ? { ...t, completed: !t.completed } : t))
       )
     );
-  }, []);
 
-  const deleteTask = useCallback((id: string) => {
+    const task = tasks.find((t) => t.id === id);
+    if (!task) return;
+
+    await fetch(`/api/tasks/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ completed: !task.completed }),
+    });
+  }, [tasks]);
+
+  const deleteTask = useCallback(async (id: string) => {
+    // Optimistic update
     setTasks((prev) => prev.filter((t) => t.id !== id));
+
+    await fetch(`/api/tasks/${id}`, { method: "DELETE" });
   }, []);
 
   const filteredTasks = tasks.filter((t) => {
